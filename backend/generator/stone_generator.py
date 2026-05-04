@@ -43,8 +43,8 @@ def generate_stones(
 
     stones = []
     for cav in cavities:
-        d = cav["diameter_mm"] * 0.96
-        h = cav["depth_mm"] * 0.92
+        d = cav["diameter_mm"] * 0.98
+        h = cav["depth_mm"] * 0.95
         h = max(h, d * 0.25)  # ensure minimum height
         gem = builder(d, h)
         cav["stone_cut"] = stone_type

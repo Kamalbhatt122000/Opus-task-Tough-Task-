@@ -8,21 +8,37 @@ import { CavityCard } from './CavityCard';
 interface CavityListProps {
   cavities: Cavity[];
   selectedId: number | null;
+  hiddenIds: ReadonlySet<number>;
   stoneMaterial: StoneMaterialName;
   onSelect: (cavity: Cavity) => void;
+  onToggleHidden: (stoneId: number) => void;
 }
 
-export function CavityList({ cavities, selectedId, stoneMaterial, onSelect }: CavityListProps) {
+export function CavityList({
+  cavities,
+  selectedId,
+  hiddenIds,
+  stoneMaterial,
+  onSelect,
+  onToggleHidden,
+}: CavityListProps) {
   if (cavities.length === 0) return null;
+
+  const visibleCount = cavities.length - hiddenIds.size;
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
-          Stones placed: {cavities.length}
+          Stones placed: {visibleCount}
+          {hiddenIds.size > 0 && (
+            <span className="text-[var(--color-text-muted)] font-normal">
+              {' '}/ {cavities.length}
+            </span>
+          )}
         </h3>
         <span className="text-xs text-[var(--color-text-muted)]">
-          Click to focus
+          Click to focus · ✕ to remove
         </span>
       </div>
 
@@ -32,8 +48,10 @@ export function CavityList({ cavities, selectedId, stoneMaterial, onSelect }: Ca
             key={cavity.id}
             cavity={cavity}
             isSelected={selectedId === cavity.id}
+            isHidden={hiddenIds.has(cavity.id)}
             stoneMaterial={stoneMaterial}
             onClick={onSelect}
+            onToggleHidden={onToggleHidden}
           />
         ))}
       </div>

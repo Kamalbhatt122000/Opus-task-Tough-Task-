@@ -4,7 +4,7 @@
  */
 
 import { Suspense, useMemo, useRef, useState, useCallback, useEffect } from 'react';
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { Canvas, useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import { OrbitControls, Environment } from '@react-three/drei';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
@@ -25,7 +25,12 @@ interface Viewer3DProps {
   showCavityMarkers: boolean;
   xrayMode: boolean;
   selectedCavityId: number | null;
+  hiddenStoneIds: ReadonlySet<number>;
+  onStoneClick: (stoneId: number) => void;
+  onRemoveStone: (stoneId: number) => void;
   meshOpacity: number;
+  zoomDistance: number;
+  onZoomDistanceChange: (distance: number) => void;
 }
 
 // ------------------------------------------------------------------
@@ -38,7 +43,9 @@ function StonesRenderer({
   stoneSize,
   customColor,
   visible,
-  selectedCavityId,
+  selectedStoneId,
+  hiddenStoneIds,
+  onStoneClick,
   centerOffset,
 }: {
   stonesGlbB64: string;
@@ -46,7 +53,9 @@ function StonesRenderer({
   stoneSize: number;
   customColor: string | null;
   visible: boolean;
-  selectedCavityId: number | null;
+  selectedStoneId: number | null;
+  hiddenStoneIds: ReadonlySet<number>;
+  onStoneClick: (stoneId: number) => void;
   centerOffset: THREE.Vector3;
 }) {
   const groupRef = useRef<THREE.Group>(null);
@@ -77,6 +86,23 @@ function StonesRenderer({
     return () => { cancelled = true; };
   }, [stonesGlbB64]);
 
+  // Tag each mesh with a stable stoneId derived from the GLB node name
+  // (backend names them "stone_1", "stone_2", …). Falls back to traversal
+  // order if the name is missing.
+  useEffect(() => {
+    if (!scene) return;
+    let traversalIdx = 0;
+    scene.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        const name = child.name || child.parent?.name || '';
+        const m = name.match(/stone_(\d+)/i);
+        const id = m ? parseInt(m[1], 10) : traversalIdx + 1;
+        child.userData.stoneId = id;
+        traversalIdx++;
+      }
+    });
+  }, [scene]);
+
   // Apply materials whenever scene, material, or custom colour changes
   useEffect(() => {
     if (!scene) return;
@@ -104,6 +130,17 @@ function StonesRenderer({
     });
     matsRef.current = mats;
   }, [scene, materialProps, customColor]);
+
+  // Per-stone visibility: hide stones whose id is in hiddenStoneIds.
+  useEffect(() => {
+    if (!scene) return;
+    scene.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        const id = child.userData.stoneId as number | undefined;
+        child.visible = id == null ? true : !hiddenStoneIds.has(id);
+      }
+    });
+  }, [scene, hiddenStoneIds]);
 
   // Scale each stone around its own centroid so size changes don't shift
   // the stones away from their cavities.
@@ -142,8 +179,8 @@ function StonesRenderer({
     scene.traverse((child) => {
       if (child instanceof THREE.Mesh && matsRef.current[idx]) {
         const mat = matsRef.current[idx];
-        const stoneNum = idx + 1;
-        if (selectedCavityId === stoneNum) {
+        const id = child.userData.stoneId as number | undefined;
+        if (id != null && selectedStoneId === id) {
           mat.emissive = new THREE.Color(glowColor);
           mat.emissiveIntensity = 0.2 + t * 0.5;
         } else {
@@ -154,11 +191,22 @@ function StonesRenderer({
     });
   });
 
+  const handleClick = useCallback((e: ThreeEvent<MouseEvent>) => {
+    e.stopPropagation();
+    let obj: THREE.Object3D | null = e.object;
+    // Walk up until we find a node with a stoneId tag
+    while (obj && obj.userData?.stoneId == null) {
+      obj = obj.parent;
+    }
+    const id = obj?.userData?.stoneId as number | undefined;
+    if (typeof id === 'number') onStoneClick(id);
+  }, [onStoneClick]);
+
   if (!scene || !visible) return null;
 
   return (
     <group position={[-centerOffset.x, -centerOffset.y, -centerOffset.z]}>
-      <primitive ref={groupRef} object={scene} />
+      <primitive ref={groupRef} object={scene} onClick={handleClick} />
     </group>
   );
 }
@@ -193,6 +241,76 @@ function CavityMarkers({ cavities, visible, centerOffset }: { cavities: Cavity[]
       })}
     </group>
   );
+}
+
+// ------------------------------------------------------------------
+// Zoom controller — keeps the slider value in App and the camera's
+// distance to the OrbitControls target in two-way sync.
+//
+// • Slider/buttons change `distance` → we dolly the camera there.
+// • Wheel/drag zoom changes the camera → we report the new distance up.
+//
+// The `skipNext` ref prevents the feedback loop where applying our own
+// dolly fires the controls 'change' event and bounces back as a
+// duplicate state update.
+// ------------------------------------------------------------------
+
+export const ZOOM_MIN_DIST = 5;
+export const ZOOM_MAX_DIST = 200;
+
+type OrbitLike = {
+  target: THREE.Vector3;
+  update: () => void;
+  addEventListener: (type: string, listener: () => void) => void;
+  removeEventListener: (type: string, listener: () => void) => void;
+};
+
+function ZoomController({
+  distance,
+  onDistanceChange,
+}: {
+  distance: number;
+  onDistanceChange: (d: number) => void;
+}) {
+  const { camera } = useThree();
+  const controls = useThree(s => s.controls) as OrbitLike | null;
+  const skipNext = useRef(false);
+
+  // Apply incoming `distance` (from slider/buttons) to the camera.
+  useEffect(() => {
+    if (!controls) return;
+    const target = controls.target;
+    const offset = new THREE.Vector3().subVectors(camera.position, target);
+    const currentDist = offset.length();
+    if (currentDist < 1e-6) return;
+    if (Math.abs(currentDist - distance) < 0.05) return;
+
+    const clamped = Math.max(ZOOM_MIN_DIST, Math.min(ZOOM_MAX_DIST, distance));
+    offset.setLength(clamped);
+    skipNext.current = true;
+    camera.position.copy(target).add(offset);
+    controls.update();
+  }, [distance, camera, controls]);
+
+  // Report distance changes (wheel zoom, drag) back up to App.
+  useEffect(() => {
+    if (!controls) return;
+    const handleChange = () => {
+      if (skipNext.current) {
+        skipNext.current = false;
+        return;
+      }
+      const d = camera.position.distanceTo(controls.target);
+      const clamped = Math.max(ZOOM_MIN_DIST, Math.min(ZOOM_MAX_DIST, d));
+      if (Math.abs(clamped - distance) > 0.05) {
+        onDistanceChange(clamped);
+      }
+    };
+    controls.addEventListener('change', handleChange);
+    return () => controls.removeEventListener('change', handleChange);
+  }, [controls, camera, distance, onDistanceChange]);
+
+  return null;
 }
 
 // ------------------------------------------------------------------
@@ -242,12 +360,29 @@ export function Viewer3D({
   showCavityMarkers,
   xrayMode,
   selectedCavityId,
+  hiddenStoneIds,
+  onStoneClick,
+  onRemoveStone,
   meshOpacity,
+  zoomDistance,
+  onZoomDistanceChange,
 }: Viewer3DProps) {
   const [autoRotate, setAutoRotate] = useState(true);
   const [meshCenter, setMeshCenter] = useState<THREE.Vector3>(new THREE.Vector3());
   const [isFullscreen, setIsFullscreen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  const handleZoomIn = useCallback(() => {
+    onZoomDistanceChange(
+      Math.max(ZOOM_MIN_DIST, Math.min(ZOOM_MAX_DIST, zoomDistance * 0.8)),
+    );
+  }, [zoomDistance, onZoomDistanceChange]);
+
+  const handleZoomOut = useCallback(() => {
+    onZoomDistanceChange(
+      Math.max(ZOOM_MIN_DIST, Math.min(ZOOM_MAX_DIST, zoomDistance * 1.25)),
+    );
+  }, [zoomDistance, onZoomDistanceChange]);
 
   const materialProps = MATERIAL_PRESETS[stoneMaterial];
 
@@ -285,10 +420,60 @@ export function Viewer3D({
 
   const hasContent = jewelleryB64 !== null;
 
+  const selectedCavity = useMemo(
+    () => (selectedCavityId == null ? null : cavities.find(c => c.id === selectedCavityId) ?? null),
+    [selectedCavityId, cavities],
+  );
+
   return (
     <div ref={containerRef} className="relative w-full h-full rounded-2xl overflow-hidden">
+      {/* Selected-stone overlay */}
+      {selectedCavity && (
+        <div
+          id="selected-stone-overlay"
+          className="absolute top-3 left-3 z-10 glass rounded-xl px-3.5 py-2.5 flex items-center gap-3 animate-fade-in"
+        >
+          <div className="text-xs text-[var(--color-text-secondary)] leading-tight">
+            <div className="font-semibold text-[var(--color-text-primary)]">
+              💎 Stone #{selectedCavity.id}
+            </div>
+            <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+              ⌀ {selectedCavity.diameter_mm.toFixed(2)} · depth {selectedCavity.depth_mm.toFixed(2)} mm
+              {hiddenStoneIds.has(selectedCavity.id) && ' · hidden'}
+            </div>
+          </div>
+          <button
+            id="remove-selected-stone"
+            onClick={() => onRemoveStone(selectedCavity.id)}
+            className={`text-xs font-medium px-3 py-1.5 rounded-lg transition-all ${
+              hiddenStoneIds.has(selectedCavity.id)
+                ? 'bg-[var(--color-accent)] text-white hover:opacity-90'
+                : 'bg-[rgba(248,113,113,0.15)] text-[var(--color-error)] hover:bg-[rgba(248,113,113,0.25)]'
+            }`}
+          >
+            {hiddenStoneIds.has(selectedCavity.id) ? '↺ Restore' : '✕ Remove'}
+          </button>
+        </div>
+      )}
+
       {/* Controls bar */}
       <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+        <button
+          id="zoom-in"
+          onClick={handleZoomIn}
+          title="Zoom in"
+          className="w-8 h-8 rounded-lg glass flex items-center justify-center text-sm text-[var(--color-text-muted)] hover:text-white transition-all"
+        >
+          +
+        </button>
+        <button
+          id="zoom-out"
+          onClick={handleZoomOut}
+          title="Zoom out"
+          className="w-8 h-8 rounded-lg glass flex items-center justify-center text-sm text-[var(--color-text-muted)] hover:text-white transition-all"
+        >
+          −
+        </button>
         <button
           id="toggle-auto-rotate"
           onClick={() => setAutoRotate(!autoRotate)}
@@ -380,7 +565,9 @@ export function Viewer3D({
               stoneSize={stoneSize}
               customColor={customColor}
               visible={showStones}
-              selectedCavityId={selectedCavityId}
+              selectedStoneId={selectedCavityId}
+              hiddenStoneIds={hiddenStoneIds}
+              onStoneClick={onStoneClick}
               centerOffset={meshCenter}
             />
           )}
@@ -390,6 +577,12 @@ export function Viewer3D({
 
           {/* Camera focus controller */}
           <CameraFocus target={focusTarget} enabled={!!selectedCavityId} />
+
+          {/* Two-way zoom binding (slider/buttons ↔ wheel) */}
+          <ZoomController
+            distance={zoomDistance}
+            onDistanceChange={onZoomDistanceChange}
+          />
 
           {/* Controls */}
           <OrbitControls

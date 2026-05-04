@@ -1,22 +1,13 @@
 """
-Stage 4 — Stone Placement (FIXED)
+Stage 4 — Stone Placement.
 
-Root cause of wrong positions:
+Penetration detection uses trimesh.proximity.signed_distance, where the
+convention is:
+  - sdf > 0  → point is INSIDE the mesh body (penetrating the metal)
+  - sdf < 0  → point is OUTSIDE the mesh body (in air, including cavity voids)
 
-ORIGINAL BUG:
-  1. stone.apply_translation(cavity["centroid_mm"]) places the stone at the
-     GEOMETRIC centroid of all cavity face-centroids. This centroid floats
-     INSIDE the mesh body, not at the actual surface rim.
-  2. rim_z = centroid[2] + depth × 0.05  — offsets along global Z, ignoring
-     that the cavity normal may not be vertical.  Stones end up floating above
-     or buried inside the metal depending on ring orientation.
-
-FIXES:
-  1. Project the cavity centroid onto the nearest mesh surface using proximity
-     query → this gives the actual surface point where the girdle should sit.
-  2. Apply depth-sinking along the CAVITY NORMAL (not global Z) so the stone
-     seats correctly regardless of ring tilt.
-  3. Collision resolution scales the stone down if it penetrates the mesh.
+A correctly seated stone has its pavilion in the cavity void (sdf < 0); only
+sdf.max() above 0 represents a real collision with the metal.
 """
 
 import logging
@@ -71,48 +62,62 @@ def place_stones(jewellery_mesh, cavities: List[Dict], stones: List) -> Dict[str
         # -------------------------------------------------------------- #
         # STEP 2: Position stone so its girdle sits at the cavity rim.
         #
-        # `seat_offset_factor` depends on the detection method:
-        #   - rim-loop cavities     → 0.0 (centroid is already on the rim)
-        #   - curvature-dish cavities → 0.40 (rim is 40% of depth above
-        #     the dish centre, along the outward normal)
+        # For rim-loop cavities the centroid is already on the rim plane.
+        # For curvature-dish cavities the centroid lies inside the dish, so
+        # we project it outward onto the mesh surface via raycast — that
+        # surface hit is the true rim. If the raycast misses (degenerate
+        # geometry), fall back to the seat_offset_factor heuristic.
         # -------------------------------------------------------------- #
         depth_mm = float(cavity["depth_mm"])
         seat_factor = float(cavity.get("seat_offset_factor", 0.40))
+
         rim_pt = centroid_arr + outward * (depth_mm * seat_factor)
+        if seat_factor > 0.0:
+            try:
+                origins = (centroid_arr - outward * 1e-3).reshape(1, 3)
+                directions = outward.reshape(1, 3)
+                locs, _, _ = jewellery_mesh.ray.intersects_location(
+                    ray_origins=origins,
+                    ray_directions=directions,
+                )
+                if len(locs) > 0:
+                    dists = np.linalg.norm(locs - centroid_arr, axis=1)
+                    rim_pt = locs[int(np.argmin(dists))]
+            except Exception as exc:
+                logger.debug("Rim raycast failed for cavity %d: %s", i + 1, exc)
+
         stone.apply_translation(rim_pt)
 
         # -------------------------------------------------------------- #
-        # STEP 3: Light collision resolution.
+        # STEP 3: Collision resolution.
         #
-        # We allow up to 6 small scale-downs (max ~6%) so the pavilion fits
-        # the cavity wall without disappearing visually. If still
-        # penetrating after that, we lift the stone outward — better to
-        # have a slightly raised stone than an invisible one.
+        # signed_distance returns POSITIVE for points inside the metal —
+        # that is the only signal of a real collision. Pavilion vertices
+        # sit in the cavity void (sdf < 0) and must NOT be flagged.
         # -------------------------------------------------------------- #
-        try:
-            sdf = trimesh.proximity.signed_distance(jewellery_mesh, stone.vertices)
-            max_pen = float(-sdf.min())
-        except Exception:
-            max_pen = 0.0
-
-        attempts = 0
-        while max_pen > 0.10 and attempts < 6:
-            centre = stone.centroid
-            stone.apply_translation(-centre)
-            stone.apply_scale(0.99)
-            stone.apply_translation(centre)
+        def _max_penetration() -> float:
             try:
                 sdf = trimesh.proximity.signed_distance(jewellery_mesh, stone.vertices)
-                max_pen = float(-sdf.min())
+                return float(max(0.0, sdf.max()))
             except Exception:
-                break
+                return 0.0
+
+        max_pen = _max_penetration()
+
+        attempts = 0
+        while max_pen > 0.05 and attempts < 4:
+            centre = stone.centroid
+            stone.apply_translation(-centre)
+            stone.apply_scale(0.97)
+            stone.apply_translation(centre)
+            max_pen = _max_penetration()
             attempts += 1
 
-        # If still penetrating, lift outward instead of shrinking further
-        if max_pen > 0.10:
-            stone.apply_translation(outward * (max_pen + 0.05))
+        if max_pen > 0.05:
+            lift = max_pen + 0.02
+            stone.apply_translation(outward * lift)
             logger.debug("Cavity %d: lifted stone by %.2fmm to clear collision",
-                         i + 1, max_pen + 0.05)
+                         i + 1, lift)
 
         placed_stones.append(stone)
         logger.info("Placed stone %d at rim=(%s) outward=(%s)",

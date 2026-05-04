@@ -75,8 +75,8 @@ def detect_cavities(mesh) -> List[Dict[str, Any]]:
             "depth_mm": round(dep, 3),
             "confidence": round(cav["confidence"], 3),
             "stone_cut": _assign_cut(d, dep),
-            "stone_diameter_mm": round(d * 0.96, 3),
-            "stone_height_mm": round(dep * 0.92, 3),
+            "stone_diameter_mm": round(d * 0.98, 3),
+            "stone_height_mm": round(dep * 0.95, 3),
             "seat_offset_factor": float(cav.get("seat_offset_factor", 0.4)),
         })
     return cavities

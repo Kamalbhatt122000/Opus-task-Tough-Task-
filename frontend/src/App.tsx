@@ -40,6 +40,15 @@ function App() {
   const [meshOpacity, setMeshOpacity] = useState(1.0);
   const [selectedCavityId, setSelectedCavityId] = useState<number | null>(null);
 
+  // Stones the user has hidden (per-session, never persisted to backend)
+  const [hiddenStoneIds, setHiddenStoneIds] = useState<Set<number>>(() => new Set());
+
+  // Camera distance to OrbitControls target. Two-way bound with the
+  // viewer — wheel-zoom updates this, and the slider drives it back.
+  // Default ≈ √(30² + 20² + 30²) ≈ 47, matching the initial camera at
+  // [30, 20, 30] looking at the origin.
+  const [zoomDistance, setZoomDistance] = useState<number>(47);
+
   // Use displayResult if available (from regeneration), else use original result
   const activeResult = displayResult || result;
 
@@ -57,15 +66,32 @@ function App() {
   const handleFileSelected = useCallback((f: File) => {
     setFile(f);
     setDisplayResult(null);
+    setHiddenStoneIds(new Set());
+    setSelectedCavityId(null);
     reset();
   }, [reset]);
 
   const handleProcess = useCallback(() => {
     if (file) {
       setDisplayResult(null);
+      setHiddenStoneIds(new Set());
+      setSelectedCavityId(null);
       process(file);
     }
   }, [file, process]);
+
+  const handleStoneClick = useCallback((stoneId: number) => {
+    setSelectedCavityId(prev => (prev === stoneId ? null : stoneId));
+  }, []);
+
+  const handleToggleHidden = useCallback((stoneId: number) => {
+    setHiddenStoneIds(prev => {
+      const next = new Set(prev);
+      if (next.has(stoneId)) next.delete(stoneId);
+      else next.add(stoneId);
+      return next;
+    });
+  }, []);
 
   const handleCutChange = useCallback(async (cut: StoneCutName) => {
     setStoneCut(cut);
@@ -233,6 +259,36 @@ function App() {
             </div>
           )}
 
+          {/* Zoom slider */}
+          {activeResult && (
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="text-xs text-[var(--color-text-muted)]">
+                  Zoom
+                </label>
+                <span className="text-[10px] text-[var(--color-text-muted)] font-mono">
+                  {zoomDistance.toFixed(1)} mm
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-[var(--color-text-muted)]">−</span>
+                <input
+                  id="zoom-slider"
+                  type="range"
+                  min={5}
+                  max={200}
+                  step={1}
+                  /* Slider direction: pulled right = zoom IN (smaller distance).
+                     We invert by displaying (max - value + min). */
+                  value={205 - zoomDistance}
+                  onChange={e => setZoomDistance(205 - parseFloat(e.target.value))}
+                  className="flex-1 accent-[var(--color-accent)]"
+                />
+                <span className="text-[10px] text-[var(--color-text-muted)]">+</span>
+              </div>
+            </div>
+          )}
+
           {/* Cavity list */}
           {activeResult && (
             <>
@@ -240,8 +296,10 @@ function App() {
               <CavityList
                 cavities={activeResult.cavities}
                 selectedId={selectedCavityId}
+                hiddenIds={hiddenStoneIds}
                 stoneMaterial={stoneMaterial}
                 onSelect={handleCavitySelect}
+                onToggleHidden={handleToggleHidden}
               />
             </>
           )}
@@ -268,7 +326,12 @@ function App() {
           showCavityMarkers={showCavityMarkers}
           xrayMode={xrayMode}
           selectedCavityId={selectedCavityId}
+          hiddenStoneIds={hiddenStoneIds}
+          onStoneClick={handleStoneClick}
+          onRemoveStone={handleToggleHidden}
           meshOpacity={meshOpacity}
+          zoomDistance={zoomDistance}
+          onZoomDistanceChange={setZoomDistance}
         />
       </main>
     </div>
