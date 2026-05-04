@@ -9,9 +9,10 @@ import { OrbitControls, Environment } from '@react-three/drei';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { JewelleryMesh } from './JewelleryMesh';
+import { ManualStoneMesh } from './ManualStoneMesh';
 import { base64ToBuffer } from '../utils/base64ToBuffer';
 import { MATERIAL_PRESETS } from '../utils/materialPresets';
-import type { Cavity, StoneMaterialName } from '../types/api';
+import type { Cavity, ManualStone, PendingMeshClick, StoneMaterialName } from '../types/api';
 import type { MaterialPreset } from '../utils/materialPresets';
 
 interface Viewer3DProps {
@@ -31,6 +32,22 @@ interface Viewer3DProps {
   meshOpacity: number;
   zoomDistance: number;
   onZoomDistanceChange: (distance: number) => void;
+  // Manual stone placement
+  manualStones: ManualStone[];
+  selectedManualId: string | null;
+  pendingMeshClick: PendingMeshClick;
+  onManualStoneClick: (stoneId: string) => void;
+  onSurfaceClick: (
+    point: [number, number, number],
+    normal: [number, number, number],
+  ) => void;
+  onCancelPending: () => void;
+  onDeselectAll: () => void;
+  // Per-stone movement
+  autoStoneOffsets: ReadonlyMap<number, [number, number, number]>;
+  onMoveAutoStone: (stoneId: number, delta: [number, number, number]) => void;
+  onResetAutoStone: (stoneId: number) => void;
+  onMoveManualStone: (stoneId: string, delta: [number, number, number]) => void;
 }
 
 // ------------------------------------------------------------------
@@ -47,6 +64,7 @@ function StonesRenderer({
   hiddenStoneIds,
   onStoneClick,
   centerOffset,
+  offsets,
 }: {
   stonesGlbB64: string;
   materialProps: MaterialPreset;
@@ -57,6 +75,7 @@ function StonesRenderer({
   hiddenStoneIds: ReadonlySet<number>;
   onStoneClick: (stoneId: number) => void;
   centerOffset: THREE.Vector3;
+  offsets: ReadonlyMap<number, [number, number, number]>;
 }) {
   const groupRef = useRef<THREE.Group>(null);
   const matsRef = useRef<THREE.MeshPhysicalMaterial[]>([]);
@@ -143,7 +162,8 @@ function StonesRenderer({
   }, [scene, hiddenStoneIds]);
 
   // Scale each stone around its own centroid so size changes don't shift
-  // the stones away from their cavities.
+  // the stones away from their cavities. Also apply user offsets from the
+  // move pad so the stone can be nudged left/right/up/down.
   useEffect(() => {
     if (!scene) return;
     scene.traverse((child) => {
@@ -158,17 +178,21 @@ function StonesRenderer({
         }
         const c: THREE.Vector3 = child.userData.localCentroid;
         const base: THREE.Vector3 = child.userData.basePosition;
-        // Scale uniformly, then offset position so centroid stays put:
-        //   newPos = base + c - c * scale
+        const id = child.userData.stoneId as number | undefined;
+        const off = (id != null ? offsets.get(id) : undefined) ?? [0, 0, 0];
+
+        // Scale uniformly around the local centroid, then add the user
+        // offset on top. The group wrapping this mesh has no rotation,
+        // so a world-space delta and a local-space delta are equal.
         child.scale.setScalar(stoneSize);
         child.position.set(
-          base.x + c.x * (1 - stoneSize),
-          base.y + c.y * (1 - stoneSize),
-          base.z + c.z * (1 - stoneSize),
+          base.x + c.x * (1 - stoneSize) + off[0],
+          base.y + c.y * (1 - stoneSize) + off[1],
+          base.z + c.z * (1 - stoneSize) + off[2],
         );
       }
     });
-  }, [scene, stoneSize]);
+  }, [scene, stoneSize, offsets]);
 
   // Emissive pulse for selected stone
   useFrame(() => {
@@ -240,6 +264,89 @@ function CavityMarkers({ cavities, visible, centerOffset }: { cavities: Cavity[]
         );
       })}
     </group>
+  );
+}
+
+// ------------------------------------------------------------------
+// Camera-vector tracker — keeps a ref up to date with the camera's
+// world-space right and up axes. Used by the Move pad to translate
+// "left/right/up/down" arrow clicks into a world-space delta that
+// matches what the user sees on screen.
+//
+// A ref (not state) avoids re-rendering the viewer every frame.
+// ------------------------------------------------------------------
+
+interface CameraVectors {
+  right: THREE.Vector3;
+  up: THREE.Vector3;
+}
+
+function CameraVectorTracker({ store }: { store: React.MutableRefObject<CameraVectors> }) {
+  const { camera } = useThree();
+  useFrame(() => {
+    store.current.right.setFromMatrixColumn(camera.matrixWorld, 0);
+    store.current.up.setFromMatrixColumn(camera.matrixWorld, 1);
+  });
+  return null;
+}
+
+// ------------------------------------------------------------------
+// Move-pad UI: 4-arrow tangent move + 2 lift buttons. Step is 0.2 mm
+// by default; Shift-click multiplies by 5.
+//
+// All work happens in the parent — this component is purely the
+// 3×3 grid of buttons + the lift row.
+// ------------------------------------------------------------------
+
+const MOVE_STEP_MM = 0.2;
+const MOVE_STEP_SHIFT_MULT = 5;
+
+type MoveDirection = 'left' | 'right' | 'up' | 'down' | 'liftUp' | 'liftDown';
+
+function MovePad({
+  onMove,
+  onReset,
+}: {
+  onMove: (dir: MoveDirection, isShift: boolean) => void;
+  onReset?: () => void;
+}) {
+  const btn =
+    'w-7 h-7 rounded-md flex items-center justify-center text-xs ' +
+    'bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] ' +
+    'hover:bg-[var(--color-border-active)] hover:text-[var(--color-text-primary)] transition-colors';
+
+  return (
+    <div className="flex items-center gap-3">
+      {/* Tangent (left / right / up / down) */}
+      <div className="grid grid-cols-3 gap-0.5">
+        <span />
+        <button onClick={e => onMove('up', e.shiftKey)} title="Up (Shift × 5)" className={btn}>↑</button>
+        <span />
+        <button onClick={e => onMove('left', e.shiftKey)} title="Left (Shift × 5)" className={btn}>←</button>
+        <span className="w-7 h-7 flex items-center justify-center text-[10px] text-[var(--color-text-muted)]">●</span>
+        <button onClick={e => onMove('right', e.shiftKey)} title="Right (Shift × 5)" className={btn}>→</button>
+        <span />
+        <button onClick={e => onMove('down', e.shiftKey)} title="Down (Shift × 5)" className={btn}>↓</button>
+        <span />
+      </div>
+
+      {/* Lift along surface normal */}
+      <div className="flex flex-col gap-0.5">
+        <button onClick={e => onMove('liftUp', e.shiftKey)} title="Lift up along normal" className={btn}>⬆</button>
+        <button onClick={e => onMove('liftDown', e.shiftKey)} title="Sink along normal" className={btn}>⬇</button>
+      </div>
+
+      {/* Optional reset (only used for auto stones) */}
+      {onReset && (
+        <button
+          onClick={onReset}
+          title="Reset to original position"
+          className="text-[10px] px-2 py-1 rounded-md bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+        >
+          Reset
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -366,11 +473,83 @@ export function Viewer3D({
   meshOpacity,
   zoomDistance,
   onZoomDistanceChange,
+  manualStones,
+  selectedManualId,
+  pendingMeshClick,
+  onManualStoneClick,
+  onSurfaceClick,
+  onCancelPending,
+  onDeselectAll,
+  autoStoneOffsets,
+  onMoveAutoStone,
+  onResetAutoStone,
+  onMoveManualStone,
 }: Viewer3DProps) {
   const [autoRotate, setAutoRotate] = useState(true);
   const [meshCenter, setMeshCenter] = useState<THREE.Vector3>(new THREE.Vector3());
   const [isFullscreen, setIsFullscreen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Updated every frame by <CameraVectorTracker>. Read on each arrow
+  // click — keeping it in a ref avoids re-rendering the whole viewer.
+  const cameraVectorsRef = useRef<CameraVectors>({
+    right: new THREE.Vector3(1, 0, 0),
+    up: new THREE.Vector3(0, 1, 0),
+  });
+
+  /**
+   * Convert a directional click + a surface normal into a world-space
+   * delta. Tangent moves (left/right/up/down) are projected onto the
+   * plane perpendicular to the normal so the stone slides along the
+   * surface; lift moves run along the normal itself.
+   */
+  const computeMoveDelta = useCallback(
+    (
+      dir: MoveDirection,
+      surfaceNormal: [number, number, number],
+      isShift: boolean,
+    ): [number, number, number] => {
+      const step = MOVE_STEP_MM * (isShift ? MOVE_STEP_SHIFT_MULT : 1);
+      const N = new THREE.Vector3(...surfaceNormal);
+      if (N.lengthSq() < 1e-9) {
+        N.set(0, 1, 0);
+      } else {
+        N.normalize();
+      }
+
+      let v: THREE.Vector3;
+      switch (dir) {
+        case 'liftUp':
+          v = N.clone().multiplyScalar(step);
+          break;
+        case 'liftDown':
+          v = N.clone().multiplyScalar(-step);
+          break;
+        case 'left':
+        case 'right':
+        case 'up':
+        case 'down': {
+          const camR = cameraVectorsRef.current.right;
+          const camU = cameraVectorsRef.current.up;
+          const tangentR = camR.clone().sub(N.clone().multiplyScalar(camR.dot(N)));
+          const tangentU = camU.clone().sub(N.clone().multiplyScalar(camU.dot(N)));
+          // Fall back to a non-zero perpendicular if the camera axis is
+          // parallel to the normal (degenerate at exactly top-down view).
+          if (tangentR.lengthSq() < 1e-9) tangentR.crossVectors(N, camU).normalize();
+          else tangentR.normalize();
+          if (tangentU.lengthSq() < 1e-9) tangentU.crossVectors(tangentR, N).normalize();
+          else tangentU.normalize();
+
+          const sign = dir === 'right' || dir === 'up' ? 1 : -1;
+          v = (dir === 'right' || dir === 'left' ? tangentR : tangentU)
+            .multiplyScalar(sign * step);
+          break;
+        }
+      }
+      return [v.x, v.y, v.z];
+    },
+    [],
+  );
 
   const handleZoomIn = useCallback(() => {
     onZoomDistanceChange(
@@ -425,34 +604,152 @@ export function Viewer3D({
     [selectedCavityId, cavities],
   );
 
+  const selectedManual = useMemo(() => {
+    if (selectedManualId == null) return null;
+    const idx = manualStones.findIndex(s => s.id === selectedManualId);
+    if (idx < 0) return null;
+    return { stone: manualStones[idx], label: `M${idx + 1}` };
+  }, [selectedManualId, manualStones]);
+
+  const isAwaitingMeshClick = pendingMeshClick !== null;
+  const movingLabel = useMemo(() => {
+    if (pendingMeshClick?.kind !== 'move') return null;
+    const idx = manualStones.findIndex(s => s.id === pendingMeshClick.stoneId);
+    return idx >= 0 ? `M${idx + 1}` : null;
+  }, [pendingMeshClick, manualStones]);
+
   return (
-    <div ref={containerRef} className="relative w-full h-full rounded-2xl overflow-hidden">
-      {/* Selected-stone overlay */}
+    <div
+      ref={containerRef}
+      className="relative w-full h-full rounded-2xl overflow-hidden"
+      style={{ cursor: isAwaitingMeshClick ? 'crosshair' : 'default' }}
+    >
+      {/* Placement banner */}
+      {isAwaitingMeshClick && (
+        <div
+          id="placement-banner"
+          className="absolute top-3 left-1/2 -translate-x-1/2 z-10 glass rounded-xl px-4 py-2 flex items-center gap-3 animate-fade-in"
+        >
+          <div className="text-xs text-[var(--color-text-secondary)]">
+            {pendingMeshClick?.kind === 'add'
+              ? '🎯 Click on the model to place a stone'
+              : `🎯 Click on the model to relocate Stone ${movingLabel ?? ''}`}
+          </div>
+          <button
+            id="cancel-placement"
+            onClick={onCancelPending}
+            className="text-[10px] px-2 py-1 rounded-md bg-[rgba(248,113,113,0.15)] text-[var(--color-error)] hover:bg-[rgba(248,113,113,0.25)] transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {/* Selected-stone overlay (auto-detected) */}
       {selectedCavity && (
         <div
           id="selected-stone-overlay"
-          className="absolute top-3 left-3 z-10 glass rounded-xl px-3.5 py-2.5 flex items-center gap-3 animate-fade-in"
+          className="absolute top-3 left-3 z-10 glass rounded-xl px-3.5 py-2.5 flex flex-col gap-2 animate-fade-in"
         >
-          <div className="text-xs text-[var(--color-text-secondary)] leading-tight">
-            <div className="font-semibold text-[var(--color-text-primary)]">
-              💎 Stone #{selectedCavity.id}
+          <div className="flex items-center gap-3">
+            <div className="text-xs text-[var(--color-text-secondary)] leading-tight">
+              <div className="font-semibold text-[var(--color-text-primary)]">
+                💎 Stone #{selectedCavity.id}
+              </div>
+              <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+                ⌀ {selectedCavity.diameter_mm.toFixed(2)} · depth {selectedCavity.depth_mm.toFixed(2)} mm
+                {hiddenStoneIds.has(selectedCavity.id) && ' · hidden'}
+              </div>
             </div>
-            <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
-              ⌀ {selectedCavity.diameter_mm.toFixed(2)} · depth {selectedCavity.depth_mm.toFixed(2)} mm
-              {hiddenStoneIds.has(selectedCavity.id) && ' · hidden'}
+            <div className="flex items-center gap-1 ml-auto">
+              <button
+                id="clear-focus-auto"
+                onClick={onDeselectAll}
+                title="Clear focus (Esc)"
+                className="text-xs font-medium px-2 py-1.5 rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-all"
+              >
+                ✕
+              </button>
+              <button
+                id="remove-selected-stone"
+                onClick={() => onRemoveStone(selectedCavity.id)}
+                className={`text-xs font-medium px-3 py-1.5 rounded-lg transition-all ${
+                  hiddenStoneIds.has(selectedCavity.id)
+                    ? 'bg-[var(--color-accent)] text-white hover:opacity-90'
+                    : 'bg-[rgba(248,113,113,0.15)] text-[var(--color-error)] hover:bg-[rgba(248,113,113,0.25)]'
+                }`}
+              >
+                {hiddenStoneIds.has(selectedCavity.id) ? '↺ Restore' : '✕ Remove'}
+              </button>
             </div>
           </div>
-          <button
-            id="remove-selected-stone"
-            onClick={() => onRemoveStone(selectedCavity.id)}
-            className={`text-xs font-medium px-3 py-1.5 rounded-lg transition-all ${
-              hiddenStoneIds.has(selectedCavity.id)
-                ? 'bg-[var(--color-accent)] text-white hover:opacity-90'
-                : 'bg-[rgba(248,113,113,0.15)] text-[var(--color-error)] hover:bg-[rgba(248,113,113,0.25)]'
-            }`}
-          >
-            {hiddenStoneIds.has(selectedCavity.id) ? '↺ Restore' : '✕ Remove'}
-          </button>
+          {!hiddenStoneIds.has(selectedCavity.id) && (
+            <div className="border-t border-[var(--color-border)] pt-2">
+              <MovePad
+                onMove={(dir, isShift) => {
+                  // Cavity stores the INWARD normal; flip to outward.
+                  const n: [number, number, number] = [
+                    -selectedCavity.normal[0],
+                    -selectedCavity.normal[1],
+                    -selectedCavity.normal[2],
+                  ];
+                  onMoveAutoStone(selectedCavity.id, computeMoveDelta(dir, n, isShift));
+                }}
+                onReset={
+                  autoStoneOffsets.has(selectedCavity.id)
+                    ? () => onResetAutoStone(selectedCavity.id)
+                    : undefined
+                }
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Selected-stone overlay (manual) */}
+      {selectedManual && (
+        <div
+          id="selected-manual-overlay"
+          className="absolute top-3 left-3 z-10 glass rounded-xl px-3.5 py-2.5 flex flex-col gap-2 animate-fade-in"
+        >
+          <div className="flex items-center gap-3">
+            <div className="text-xs text-[var(--color-text-secondary)] leading-tight">
+              <div className="font-semibold text-[var(--color-text-primary)]">
+                💎 Stone {selectedManual.label}
+                <span className="ml-2 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] font-normal">
+                  manual
+                </span>
+              </div>
+              <div className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+                ⌀ {selectedManual.stone.diameter_mm.toFixed(2)} mm
+                {selectedManual.stone.liftOffset !== 0 && (
+                  <>
+                    {' · lift '}
+                    {selectedManual.stone.liftOffset > 0 ? '+' : ''}
+                    {selectedManual.stone.liftOffset.toFixed(2)} mm
+                  </>
+                )}
+              </div>
+            </div>
+            <button
+              id="clear-focus-manual"
+              onClick={onDeselectAll}
+              title="Clear focus (Esc, or click empty space)"
+              className="ml-auto text-xs font-medium px-3 py-1.5 rounded-lg bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-border)] transition-all"
+            >
+              ✕ Clear focus
+            </button>
+          </div>
+          <div className="border-t border-[var(--color-border)] pt-2">
+            <MovePad
+              onMove={(dir, isShift) => {
+                onMoveManualStone(
+                  selectedManual.stone.id,
+                  computeMoveDelta(dir, selectedManual.stone.normal, isShift),
+                );
+              }}
+            />
+          </div>
         </div>
       )}
 
@@ -524,6 +821,14 @@ export function Viewer3D({
         shadows
         gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.2 }}
         style={{ background: 'linear-gradient(180deg, #0a0a0f 0%, #12121a 50%, #1a1a2e 100%)' }}
+        onPointerMissed={() => {
+          // Click on empty space → clear focus.
+          // Skip if a placement is armed; the user is mid-action.
+          if (isAwaitingMeshClick) return;
+          if (selectedCavityId !== null || selectedManualId !== null) {
+            onDeselectAll();
+          }
+        }}
       >
         <Suspense fallback={null}>
           {/* Studio HDRI environment */}
@@ -554,10 +859,11 @@ export function Viewer3D({
               opacity={meshOpacity}
               xrayMode={xrayMode}
               onCenterComputed={handleCenterComputed}
+              onSurfaceClick={isAwaitingMeshClick ? onSurfaceClick : undefined}
             />
           )}
 
-          {/* Stones */}
+          {/* Stones (auto-detected) */}
           {stonesGlbB64 && (
             <StonesRenderer
               stonesGlbB64={stonesGlbB64}
@@ -569,8 +875,22 @@ export function Viewer3D({
               hiddenStoneIds={hiddenStoneIds}
               onStoneClick={onStoneClick}
               centerOffset={meshCenter}
+              offsets={autoStoneOffsets}
             />
           )}
+
+          {/* Manual stones (user-placed) */}
+          {manualStones.map(stone => (
+            <ManualStoneMesh
+              key={stone.id}
+              stone={stone}
+              materialProps={materialProps}
+              customColor={customColor}
+              isSelected={selectedManualId === stone.id}
+              visible={showStones}
+              onClick={onManualStoneClick}
+            />
+          ))}
 
           {/* Cavity markers */}
           <CavityMarkers cavities={cavities} visible={showCavityMarkers} centerOffset={meshCenter} />
@@ -583,6 +903,9 @@ export function Viewer3D({
             distance={zoomDistance}
             onDistanceChange={onZoomDistanceChange}
           />
+
+          {/* Track camera world-space right/up axes for move-pad use */}
+          <CameraVectorTracker store={cameraVectorsRef} />
 
           {/* Controls */}
           <OrbitControls

@@ -4,15 +4,23 @@
  * Layout: Left panel (35%) with controls + Right panel (65%) with 3D viewer.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { UploadZone } from './components/UploadZone';
 import { ProgressStepper } from './components/ProgressStepper';
 import { StoneControls } from './components/StoneControls';
 import { CavityList } from './components/CavityList';
+import { ManualStonePanel } from './components/ManualStonePanel';
 import { Viewer3D } from './components/Viewer3D';
 import { useProcess } from './hooks/useProcess';
 import { useRegenerate } from './hooks/useRegenerate';
-import type { Cavity, StoneMaterialName, StoneCutName, ProcessResponse } from './types/api';
+import type {
+  Cavity,
+  ManualStone,
+  PendingMeshClick,
+  StoneMaterialName,
+  StoneCutName,
+  ProcessResponse,
+} from './types/api';
 
 function App() {
   // File state
@@ -49,6 +57,18 @@ function App() {
   // [30, 20, 30] looking at the origin.
   const [zoomDistance, setZoomDistance] = useState<number>(47);
 
+  // Manual stone placement (entirely client-side)
+  const [manualStones, setManualStones] = useState<ManualStone[]>([]);
+  const [selectedManualId, setSelectedManualId] = useState<string | null>(null);
+  const [pendingMeshClick, setPendingMeshClick] = useState<PendingMeshClick>(null);
+
+  // World-space delta applied on top of each auto stone's baked position.
+  // Empty = stone sits exactly where the backend placed it. Cleared when
+  // the user re-uploads / reprocesses.
+  const [autoStoneOffsets, setAutoStoneOffsets] = useState<Map<number, [number, number, number]>>(
+    () => new Map(),
+  );
+
   // Use displayResult if available (from regeneration), else use original result
   const activeResult = displayResult || result;
 
@@ -68,6 +88,10 @@ function App() {
     setDisplayResult(null);
     setHiddenStoneIds(new Set());
     setSelectedCavityId(null);
+    setManualStones([]);
+    setSelectedManualId(null);
+    setPendingMeshClick(null);
+    setAutoStoneOffsets(new Map());
     reset();
   }, [reset]);
 
@@ -76,13 +100,173 @@ function App() {
       setDisplayResult(null);
       setHiddenStoneIds(new Set());
       setSelectedCavityId(null);
+      setManualStones([]);
+      setSelectedManualId(null);
+      setPendingMeshClick(null);
+      setAutoStoneOffsets(new Map());
       process(file);
     }
   }, [file, process]);
 
   const handleStoneClick = useCallback((stoneId: number) => {
+    // Selecting an auto stone clears manual selection and any pending click.
+    setSelectedManualId(null);
+    setPendingMeshClick(null);
     setSelectedCavityId(prev => (prev === stoneId ? null : stoneId));
   }, []);
+
+  // ---- Manual stone handlers ----
+
+  const handleManualStoneClick = useCallback((stoneId: string) => {
+    setSelectedCavityId(null);
+    setSelectedManualId(prev => (prev === stoneId ? null : stoneId));
+  }, []);
+
+  const handleSelectManual = useCallback((stoneId: string | null) => {
+    setSelectedCavityId(null);
+    setSelectedManualId(stoneId);
+  }, []);
+
+  const handleArmAdd = useCallback(() => {
+    setPendingMeshClick({ kind: 'add' });
+  }, []);
+
+  const handleArmMove = useCallback((stoneId: string) => {
+    setPendingMeshClick({ kind: 'move', stoneId });
+  }, []);
+
+  const handleCancelPending = useCallback(() => {
+    setPendingMeshClick(null);
+  }, []);
+
+  const handleSurfaceClick = useCallback(
+    (
+      point: [number, number, number],
+      normal: [number, number, number],
+    ) => {
+      setPendingMeshClick(prev => {
+        if (prev === null) return prev;
+        if (prev.kind === 'add') {
+          const id =
+            typeof crypto !== 'undefined' && 'randomUUID' in crypto
+              ? crypto.randomUUID()
+              : `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          const newStone: ManualStone = {
+            id,
+            position: point,
+            normal,
+            diameter_mm: 2.0,
+            depth_mm: 1.4,
+            cut: 'round_brilliant',
+            liftOffset: 0,
+          };
+          setManualStones(s => [...s, newStone]);
+          setSelectedManualId(id);
+          setSelectedCavityId(null);
+        } else if (prev.kind === 'move') {
+          const targetId = prev.stoneId;
+          setManualStones(s =>
+            s.map(stone =>
+              stone.id === targetId ? { ...stone, position: point, normal } : stone,
+            ),
+          );
+        }
+        return null;
+      });
+    },
+    [],
+  );
+
+  const handleUpdateManual = useCallback(
+    (stoneId: string, patch: Partial<ManualStone>) => {
+      setManualStones(s =>
+        s.map(stone => (stone.id === stoneId ? { ...stone, ...patch } : stone)),
+      );
+    },
+    [],
+  );
+
+  const handleRemoveManual = useCallback((stoneId: string) => {
+    setManualStones(s => s.filter(stone => stone.id !== stoneId));
+    setSelectedManualId(prev => (prev === stoneId ? null : prev));
+    setPendingMeshClick(prev =>
+      prev?.kind === 'move' && prev.stoneId === stoneId ? null : prev,
+    );
+  }, []);
+
+  /**
+   * Clear focus from any selected stone (auto or manual).
+   * Bound to: ✕ overlay button, click on empty viewer space, ESC key.
+   */
+  const handleDeselectAll = useCallback(() => {
+    setSelectedCavityId(null);
+    setSelectedManualId(null);
+  }, []);
+
+  // ---- Move handlers (work for both auto and manual stones) ----
+
+  const handleMoveAutoStone = useCallback(
+    (stoneId: number, delta: [number, number, number]) => {
+      setAutoStoneOffsets(prev => {
+        const next = new Map(prev);
+        const cur = next.get(stoneId) ?? [0, 0, 0];
+        next.set(stoneId, [
+          cur[0] + delta[0],
+          cur[1] + delta[1],
+          cur[2] + delta[2],
+        ]);
+        return next;
+      });
+    },
+    [],
+  );
+
+  const handleResetAutoStone = useCallback((stoneId: number) => {
+    setAutoStoneOffsets(prev => {
+      if (!prev.has(stoneId)) return prev;
+      const next = new Map(prev);
+      next.delete(stoneId);
+      return next;
+    });
+  }, []);
+
+  const handleMoveManualStone = useCallback(
+    (stoneId: string, delta: [number, number, number]) => {
+      setManualStones(s =>
+        s.map(stone =>
+          stone.id === stoneId
+            ? {
+                ...stone,
+                position: [
+                  stone.position[0] + delta[0],
+                  stone.position[1] + delta[1],
+                  stone.position[2] + delta[2],
+                ],
+              }
+            : stone,
+        ),
+      );
+    },
+    [],
+  );
+
+  // ESC clears focus / cancels a pending placement, whichever is active.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      // Don't steal Esc when the user is typing in an input/textarea/select.
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      if (pendingMeshClick !== null) {
+        setPendingMeshClick(null);
+      } else if (selectedCavityId !== null || selectedManualId !== null) {
+        handleDeselectAll();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [pendingMeshClick, selectedCavityId, selectedManualId, handleDeselectAll]);
 
   const handleToggleHidden = useCallback((stoneId: number) => {
     setHiddenStoneIds(prev => {
@@ -303,6 +487,24 @@ function App() {
               />
             </>
           )}
+
+          {/* Manual stone placement */}
+          {activeResult && (
+            <>
+              <div className="h-px bg-[var(--color-border)]" />
+              <ManualStonePanel
+                stones={manualStones}
+                selectedId={selectedManualId}
+                pending={pendingMeshClick}
+                onArmAdd={handleArmAdd}
+                onArmMove={handleArmMove}
+                onCancelPending={handleCancelPending}
+                onSelect={handleSelectManual}
+                onUpdate={handleUpdateManual}
+                onRemove={handleRemoveManual}
+              />
+            </>
+          )}
         </div>
 
         {/* Footer */}
@@ -332,6 +534,17 @@ function App() {
           meshOpacity={meshOpacity}
           zoomDistance={zoomDistance}
           onZoomDistanceChange={setZoomDistance}
+          manualStones={manualStones}
+          selectedManualId={selectedManualId}
+          pendingMeshClick={pendingMeshClick}
+          onManualStoneClick={handleManualStoneClick}
+          onSurfaceClick={handleSurfaceClick}
+          onCancelPending={handleCancelPending}
+          onDeselectAll={handleDeselectAll}
+          autoStoneOffsets={autoStoneOffsets}
+          onMoveAutoStone={handleMoveAutoStone}
+          onResetAutoStone={handleResetAutoStone}
+          onMoveManualStone={handleMoveManualStone}
         />
       </main>
     </div>

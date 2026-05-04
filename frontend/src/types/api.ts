@@ -61,3 +61,33 @@ export interface RegenerateRequest {
   stone_type: string;
   stone_material: string;
 }
+
+/**
+ * A user-placed stone, stored entirely client-side. Position and normal
+ * are in the same centered world space as the displayed STL geometry, so
+ * a raycast hit on the JewelleryMesh can be saved directly into these
+ * fields without any offset math.
+ */
+export interface ManualStone {
+  id: string;
+  position: [number, number, number];
+  normal: [number, number, number];
+  diameter_mm: number;
+  depth_mm: number;
+  cut: StoneCutName;
+  /** Distance along the surface normal — positive = above, negative = sunk in. */
+  liftOffset: number;
+}
+
+/**
+ * What should happen the next time the user clicks the jewellery mesh.
+ *  - 'add'  → create a new manual stone at the click point
+ *  - 'move' → relocate stoneId to the click point
+ *  -  null  → ignore mesh clicks (default)
+ *
+ * Both intents are single-shot — once consumed, the action clears.
+ */
+export type PendingMeshClick =
+  | { kind: 'add' }
+  | { kind: 'move'; stoneId: string }
+  | null;

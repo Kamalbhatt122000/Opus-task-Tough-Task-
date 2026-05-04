@@ -1,8 +1,14 @@
 /**
  * Renders the STL jewellery mesh with metallic PBR material.
+ *
+ * If `onSurfaceClick` is provided, mesh clicks are reported with the
+ * world-space hit point and outward face normal. The mesh sits at
+ * identity transform (only the geometry is centered), so e.point and
+ * e.face.normal are already in world / centered space.
  */
 
-import { useMemo, useEffect } from 'react';
+import { useMemo, useEffect, useCallback } from 'react';
+import { type ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { base64ToBuffer } from '../utils/base64ToBuffer';
@@ -12,9 +18,19 @@ interface JewelleryMeshProps {
   opacity: number;
   xrayMode: boolean;
   onCenterComputed?: (center: THREE.Vector3) => void;
+  onSurfaceClick?: (
+    point: [number, number, number],
+    normal: [number, number, number],
+  ) => void;
 }
 
-export function JewelleryMesh({ stlBase64, opacity, xrayMode, onCenterComputed }: JewelleryMeshProps) {
+export function JewelleryMesh({
+  stlBase64,
+  opacity,
+  xrayMode,
+  onCenterComputed,
+  onSurfaceClick,
+}: JewelleryMeshProps) {
   const { geometry, center } = useMemo(() => {
     const buffer = base64ToBuffer(stlBase64);
     const loader = new STLLoader();
@@ -35,8 +51,26 @@ export function JewelleryMesh({ stlBase64, opacity, xrayMode, onCenterComputed }
     }
   }, [center, onCenterComputed]);
 
+  const handleClick = useCallback(
+    (e: ThreeEvent<MouseEvent>) => {
+      if (!onSurfaceClick || !e.face) return;
+      e.stopPropagation();
+      const n = e.face.normal.clone().normalize();
+      onSurfaceClick(
+        [e.point.x, e.point.y, e.point.z],
+        [n.x, n.y, n.z],
+      );
+    },
+    [onSurfaceClick],
+  );
+
   return (
-    <mesh geometry={geometry} castShadow receiveShadow>
+    <mesh
+      geometry={geometry}
+      castShadow
+      receiveShadow
+      onClick={onSurfaceClick ? handleClick : undefined}
+    >
       <meshPhysicalMaterial
         color="#C0C0C0"
         metalness={0.9}
