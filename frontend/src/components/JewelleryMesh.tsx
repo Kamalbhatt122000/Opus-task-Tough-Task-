@@ -12,11 +12,14 @@ import { type ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { base64ToBuffer } from '../utils/base64ToBuffer';
+import type { JewelleryPreset } from '../utils/materialPresets';
 
 interface JewelleryMeshProps {
   stlBase64: string;
   opacity: number;
   xrayMode: boolean;
+  materialPreset: JewelleryPreset;
+  customColor: string | null;
   onCenterComputed?: (center: THREE.Vector3) => void;
   onSurfaceClick?: (
     point: [number, number, number],
@@ -28,6 +31,8 @@ export function JewelleryMesh({
   stlBase64,
   opacity,
   xrayMode,
+  materialPreset,
+  customColor,
   onCenterComputed,
   onSurfaceClick,
 }: JewelleryMeshProps) {
@@ -64,6 +69,8 @@ export function JewelleryMesh({
     [onSurfaceClick],
   );
 
+  const effectiveColor = customColor ?? materialPreset.color;
+
   return (
     <mesh
       geometry={geometry}
@@ -72,15 +79,15 @@ export function JewelleryMesh({
       onClick={onSurfaceClick ? handleClick : undefined}
     >
       <meshPhysicalMaterial
-        color="#C0C0C0"
-        metalness={0.9}
-        roughness={0.15}
+        color={effectiveColor}
+        metalness={materialPreset.metalness}
+        roughness={materialPreset.roughness}
         transparent={xrayMode || opacity < 1}
         opacity={xrayMode ? 0.3 : opacity}
         side={THREE.DoubleSide}
-        envMapIntensity={2}
-        clearcoat={0.5}
-        clearcoatRoughness={0.1}
+        envMapIntensity={materialPreset.envMapIntensity}
+        clearcoat={materialPreset.clearcoat}
+        clearcoatRoughness={materialPreset.clearcoatRoughness}
       />
     </mesh>
   );

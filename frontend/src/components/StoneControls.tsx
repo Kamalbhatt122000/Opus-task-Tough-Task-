@@ -2,14 +2,21 @@
  * Stone controls panel — stone type, material, toggles, export.
  */
 
-import type { StoneMaterialName, StoneCutName } from '../types/api';
-import { STONE_CUTS, STONE_MATERIAL_NAMES } from '../utils/materialPresets';
+import type { StoneMaterialName, StoneCutName, JewelleryMaterialName } from '../types/api';
+import {
+  STONE_CUTS,
+  STONE_MATERIAL_NAMES,
+  JEWELLERY_MATERIAL_NAMES,
+  JEWELLERY_PRESETS,
+} from '../utils/materialPresets';
 
 interface StoneControlsProps {
   stoneCut: StoneCutName;
   stoneMaterial: StoneMaterialName;
   stoneSize: number;
   customColor: string | null;
+  jewelleryMaterial: JewelleryMaterialName;
+  jewelleryCustomColor: string | null;
   showStones: boolean;
   showCavityMarkers: boolean;
   xrayMode: boolean;
@@ -17,6 +24,8 @@ interface StoneControlsProps {
   onMaterialChange: (mat: StoneMaterialName) => void;
   onSizeChange: (size: number) => void;
   onCustomColorChange: (color: string | null) => void;
+  onJewelleryMaterialChange: (mat: JewelleryMaterialName) => void;
+  onJewelleryCustomColorChange: (color: string | null) => void;
   onToggleStones: () => void;
   onToggleCavityMarkers: () => void;
   onToggleXray: () => void;
@@ -30,6 +39,8 @@ export function StoneControls({
   stoneMaterial,
   stoneSize,
   customColor,
+  jewelleryMaterial,
+  jewelleryCustomColor,
   showStones,
   showCavityMarkers,
   xrayMode,
@@ -37,6 +48,8 @@ export function StoneControls({
   onMaterialChange,
   onSizeChange,
   onCustomColorChange,
+  onJewelleryMaterialChange,
+  onJewelleryCustomColorChange,
   onToggleStones,
   onToggleCavityMarkers,
   onToggleXray,
@@ -44,6 +57,8 @@ export function StoneControls({
   onExportJson,
   isRegenerating,
 }: StoneControlsProps) {
+  const jewellerySwatch =
+    jewelleryCustomColor ?? JEWELLERY_PRESETS[jewelleryMaterial].color;
   return (
     <div className="space-y-4 animate-fade-in">
       <h3 className="text-sm font-semibold text-[var(--color-text-primary)] flex items-center gap-2">
@@ -136,6 +151,76 @@ export function StoneControls({
             }}
             className="flex-1 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-xs text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)] transition-colors font-mono"
           />
+        </div>
+      </div>
+
+      {/* ── Jewellery body (STL mesh) appearance ── */}
+      <div className="pt-2 border-t border-[var(--color-border)]">
+        <h3 className="text-sm font-semibold text-[var(--color-text-primary)] flex items-center gap-2 mb-3">
+          <span className="w-1.5 h-1.5 rounded-full bg-[#F5C76A]" />
+          Jewellery Colour
+          <span
+            className="ml-auto w-4 h-4 rounded-full border border-[var(--color-border)]"
+            style={{ backgroundColor: jewellerySwatch }}
+            title={jewelleryCustomColor ? `Custom ${jewelleryCustomColor}` : jewelleryMaterial}
+          />
+        </h3>
+
+        {/* Jewellery Material */}
+        <div>
+          <label className="text-xs text-[var(--color-text-muted)] mb-1.5 block">
+            Jewellery Material
+          </label>
+          <select
+            id="jewellery-material-select"
+            value={jewelleryMaterial}
+            onChange={e => onJewelleryMaterialChange(e.target.value as JewelleryMaterialName)}
+            className="w-full bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)] transition-colors"
+          >
+            {JEWELLERY_MATERIAL_NAMES.map(name => (
+              <option key={name} value={name}>{name}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Jewellery Custom Colour */}
+        <div className="mt-3">
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-xs text-[var(--color-text-muted)]">Custom Colour</label>
+            {jewelleryCustomColor && (
+              <button
+                id="reset-jewellery-color"
+                onClick={() => onJewelleryCustomColorChange(null)}
+                className="text-[10px] text-[var(--color-accent)] hover:underline"
+              >
+                Reset to {jewelleryMaterial}
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              id="jewellery-color-picker"
+              type="color"
+              value={jewelleryCustomColor ?? JEWELLERY_PRESETS[jewelleryMaterial].color}
+              onChange={e => onJewelleryCustomColorChange(e.target.value)}
+              className="w-10 h-9 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] cursor-pointer"
+            />
+            <input
+              id="jewellery-color-hex"
+              type="text"
+              value={jewelleryCustomColor ?? ''}
+              placeholder="#auto (preset)"
+              onChange={e => {
+                const v = e.target.value.trim();
+                if (v === '') return onJewelleryCustomColorChange(null);
+                if (/^#[0-9a-fA-F]{6}$/.test(v)) onJewelleryCustomColorChange(v);
+              }}
+              className="flex-1 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-xs text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)] transition-colors font-mono"
+            />
+          </div>
+          <p className="text-[10px] text-[var(--color-text-muted)] mt-1.5">
+            Tints the jewellery body only — stones are unaffected.
+          </p>
         </div>
       </div>
 

@@ -19,6 +19,7 @@ import type {
   PendingMeshClick,
   StoneMaterialName,
   StoneCutName,
+  JewelleryMaterialName,
   ProcessResponse,
 } from './types/api';
 
@@ -40,6 +41,10 @@ function App() {
   const [stoneMaterial, setStoneMaterial] = useState<StoneMaterialName>('Diamond');
   const [stoneSize, setStoneSize] = useState<number>(1.0);
   const [customColor, setCustomColor] = useState<string | null>(null);
+
+  // Jewellery (STL body) appearance — independent from the stones.
+  const [jewelleryMaterial, setJewelleryMaterial] = useState<JewelleryMaterialName>('Silver');
+  const [jewelleryCustomColor, setJewelleryCustomColor] = useState<string | null>(null);
 
   // Viewer toggles
   const [showStones, setShowStones] = useState(true);
@@ -407,6 +412,8 @@ function App() {
                 stoneMaterial={stoneMaterial}
                 stoneSize={stoneSize}
                 customColor={customColor}
+                jewelleryMaterial={jewelleryMaterial}
+                jewelleryCustomColor={jewelleryCustomColor}
                 showStones={showStones}
                 showCavityMarkers={showCavityMarkers}
                 xrayMode={xrayMode}
@@ -414,6 +421,8 @@ function App() {
                 onMaterialChange={handleMaterialChange}
                 onSizeChange={setStoneSize}
                 onCustomColorChange={setCustomColor}
+                onJewelleryMaterialChange={setJewelleryMaterial}
+                onJewelleryCustomColorChange={setJewelleryCustomColor}
                 onToggleStones={() => setShowStones(!showStones)}
                 onToggleCavityMarkers={() => setShowCavityMarkers(!showCavityMarkers)}
                 onToggleXray={() => setXrayMode(!xrayMode)}
@@ -524,6 +533,8 @@ function App() {
           stoneMaterial={stoneMaterial}
           stoneSize={stoneSize}
           customColor={customColor}
+          jewelleryMaterial={jewelleryMaterial}
+          jewelleryCustomColor={jewelleryCustomColor}
           showStones={showStones}
           showCavityMarkers={showCavityMarkers}
           xrayMode={xrayMode}
@@ -541,6 +552,7 @@ function App() {
           onSurfaceClick={handleSurfaceClick}
           onCancelPending={handleCancelPending}
           onDeselectAll={handleDeselectAll}
+          onRemoveManualStone={handleRemoveManual}
           autoStoneOffsets={autoStoneOffsets}
           onMoveAutoStone={handleMoveAutoStone}
           onResetAutoStone={handleResetAutoStone}

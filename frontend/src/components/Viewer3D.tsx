@@ -11,8 +11,14 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { JewelleryMesh } from './JewelleryMesh';
 import { ManualStoneMesh } from './ManualStoneMesh';
 import { base64ToBuffer } from '../utils/base64ToBuffer';
-import { MATERIAL_PRESETS } from '../utils/materialPresets';
-import type { Cavity, ManualStone, PendingMeshClick, StoneMaterialName } from '../types/api';
+import { MATERIAL_PRESETS, JEWELLERY_PRESETS } from '../utils/materialPresets';
+import type {
+  Cavity,
+  ManualStone,
+  PendingMeshClick,
+  StoneMaterialName,
+  JewelleryMaterialName,
+} from '../types/api';
 import type { MaterialPreset } from '../utils/materialPresets';
 
 interface Viewer3DProps {
@@ -22,6 +28,8 @@ interface Viewer3DProps {
   stoneMaterial: StoneMaterialName;
   stoneSize: number;
   customColor: string | null;
+  jewelleryMaterial: JewelleryMaterialName;
+  jewelleryCustomColor: string | null;
   showStones: boolean;
   showCavityMarkers: boolean;
   xrayMode: boolean;
@@ -43,6 +51,7 @@ interface Viewer3DProps {
   ) => void;
   onCancelPending: () => void;
   onDeselectAll: () => void;
+  onRemoveManualStone: (stoneId: string) => void;
   // Per-stone movement
   autoStoneOffsets: ReadonlyMap<number, [number, number, number]>;
   onMoveAutoStone: (stoneId: number, delta: [number, number, number]) => void;
@@ -480,6 +489,8 @@ export function Viewer3D({
   stoneMaterial,
   stoneSize,
   customColor,
+  jewelleryMaterial,
+  jewelleryCustomColor,
   showStones,
   showCavityMarkers,
   xrayMode,
@@ -497,6 +508,7 @@ export function Viewer3D({
   onSurfaceClick,
   onCancelPending,
   onDeselectAll,
+  onRemoveManualStone,
   autoStoneOffsets,
   onMoveAutoStone,
   onResetAutoStone,
@@ -622,6 +634,7 @@ export function Viewer3D({
   }, [zoomDistance, onZoomDistanceChange]);
 
   const materialProps = MATERIAL_PRESETS[stoneMaterial];
+  const jewelleryPreset = JEWELLERY_PRESETS[jewelleryMaterial];
 
   const handleCenterComputed = useCallback((center: THREE.Vector3) => {
     setMeshCenter(center);
@@ -789,14 +802,24 @@ export function Viewer3D({
                 )}
               </div>
             </div>
-            <button
-              id="clear-focus-manual"
-              onClick={onDeselectAll}
-              title="Clear focus (Esc, or click empty space)"
-              className="ml-auto text-xs font-medium px-3 py-1.5 rounded-lg bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-border)] transition-all"
-            >
-              ✕ Clear focus
-            </button>
+            <div className="flex items-center gap-1 ml-auto">
+              <button
+                id="clear-focus-manual"
+                onClick={onDeselectAll}
+                title="Clear focus (Esc, or click empty space)"
+                className="text-xs font-medium px-2 py-1.5 rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-all"
+              >
+                ✕
+              </button>
+              <button
+                id="remove-selected-manual"
+                onClick={() => onRemoveManualStone(selectedManual.stone.id)}
+                title="Delete this stone"
+                className="text-xs font-medium px-3 py-1.5 rounded-lg bg-[rgba(248,113,113,0.15)] text-[var(--color-error)] hover:bg-[rgba(248,113,113,0.25)] transition-all"
+              >
+                ✕ Remove
+              </button>
+            </div>
           </div>
           <div className="border-t border-[var(--color-border)] pt-2">
             <MovePad
@@ -979,6 +1002,8 @@ export function Viewer3D({
               stlBase64={jewelleryB64}
               opacity={meshOpacity}
               xrayMode={xrayMode}
+              materialPreset={jewelleryPreset}
+              customColor={jewelleryCustomColor}
               onCenterComputed={handleCenterComputed}
               onSurfaceClick={isAwaitingMeshClick ? onSurfaceClick : undefined}
             />

@@ -55,6 +55,13 @@ export interface StageProgress {
 
 export type StoneMaterialName = 'Diamond' | 'Ruby' | 'Emerald' | 'Sapphire' | 'Amethyst';
 export type StoneCutName = 'round_brilliant' | 'princess' | 'oval' | 'marquise' | 'emerald';
+export type JewelleryMaterialName =
+  | 'Silver'
+  | 'Yellow Gold'
+  | 'Rose Gold'
+  | 'White Gold'
+  | 'Platinum'
+  | 'Oxidized';
 
 export interface RegenerateRequest {
   session_id: string;
