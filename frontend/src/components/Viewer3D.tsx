@@ -291,6 +291,23 @@ function CameraVectorTracker({ store }: { store: React.MutableRefObject<CameraVe
 }
 
 // ------------------------------------------------------------------
+// Controls bridge — captures OrbitControls into a ref accessible from
+// HTML buttons rendered outside the Canvas (pan arrows, etc.).
+// ------------------------------------------------------------------
+
+function ControlsBridge({
+  store,
+}: {
+  store: React.MutableRefObject<OrbitLike | null>;
+}) {
+  const controls = useThree(s => s.controls) as OrbitLike | null;
+  useEffect(() => {
+    store.current = controls;
+  }, [controls, store]);
+  return null;
+}
+
+// ------------------------------------------------------------------
 // Move-pad UI: 4-arrow tangent move + 2 lift buttons. Step is 0.2 mm
 // by default; Shift-click multiplies by 5.
 //
@@ -488,7 +505,48 @@ export function Viewer3D({
   const [autoRotate, setAutoRotate] = useState(true);
   const [meshCenter, setMeshCenter] = useState<THREE.Vector3>(new THREE.Vector3());
   const [isFullscreen, setIsFullscreen] = useState(false);
+  // When true, left-drag pans (translates the camera target) instead of
+  // orbiting; right-drag rotates. Doesn't affect wheel zoom.
+  const [panMode, setPanMode] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Captured by <ControlsBridge> below so HTML buttons can drive OrbitControls.
+  const controlsStoreRef = useRef<OrbitLike | null>(null);
+
+  // Reused buffer so we don't allocate a Vector3 on every pan-button press.
+  const panBufRef = useRef(new THREE.Vector3());
+
+  /**
+   * Pan the camera + its OrbitControls target along the screen-aligned
+   * axis the user pressed. Step scales with current zoom distance so a
+   * click feels the same whether the user is zoomed in or out.
+   *
+   * Camera and target move by the same delta — that keeps the orbit
+   * pivot pinned to the same screen location, so subsequent rotation
+   * still feels natural.
+   */
+  const panCamera = useCallback(
+    (dir: 'left' | 'right' | 'up' | 'down', isShift: boolean) => {
+      const controls = controlsStoreRef.current;
+      if (!controls) return;
+      const baseStep = Math.max(zoomDistance * 0.05, 0.5);
+      const step = baseStep * (isShift ? 3 : 1);
+      const sign = dir === 'right' || dir === 'up' ? 1 : -1;
+      const axis =
+        dir === 'left' || dir === 'right'
+          ? cameraVectorsRef.current.right
+          : cameraVectorsRef.current.up;
+      const delta = panBufRef.current.copy(axis).multiplyScalar(sign * step);
+      controls.target.add(delta);
+      // OrbitControls' `object` field is the controlled camera. Type
+      // assertion needed because OrbitLike intentionally only declares
+      // the bits this file uses.
+      const cam = (controls as unknown as { object: THREE.Object3D }).object;
+      cam.position.add(delta);
+      controls.update();
+    },
+    [zoomDistance],
+  );
 
   // Updated every frame by <CameraVectorTracker>. Read on each arrow
   // click — keeping it in a ref avoids re-rendering the whole viewer.
@@ -754,51 +812,114 @@ export function Viewer3D({
       )}
 
       {/* Controls bar */}
-      <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
-        <button
-          id="zoom-in"
-          onClick={handleZoomIn}
-          title="Zoom in"
-          className="w-8 h-8 rounded-lg glass flex items-center justify-center text-sm text-[var(--color-text-muted)] hover:text-white transition-all"
-        >
-          +
-        </button>
-        <button
-          id="zoom-out"
-          onClick={handleZoomOut}
-          title="Zoom out"
-          className="w-8 h-8 rounded-lg glass flex items-center justify-center text-sm text-[var(--color-text-muted)] hover:text-white transition-all"
-        >
-          −
-        </button>
-        <button
-          id="toggle-auto-rotate"
-          onClick={() => setAutoRotate(!autoRotate)}
-          title="Toggle auto-rotate"
-          className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs transition-all ${
-            autoRotate
-              ? 'bg-[var(--color-accent)] text-white'
-              : 'glass text-[var(--color-text-muted)] hover:text-white'
-          }`}
-        >
-          ↻
-        </button>
-        <button
-          id="reset-camera"
-          onClick={resetCamera}
-          title="Reset camera"
-          className="w-8 h-8 rounded-lg glass flex items-center justify-center text-xs text-[var(--color-text-muted)] hover:text-white transition-all"
-        >
-          ⟲
-        </button>
-        <button
-          id="toggle-fullscreen"
-          onClick={toggleFullscreen}
-          title="Fullscreen"
-          className="w-8 h-8 rounded-lg glass flex items-center justify-center text-xs text-[var(--color-text-muted)] hover:text-white transition-all"
-        >
-          {isFullscreen ? '⊖' : '⊕'}
-        </button>
+      <div className="absolute top-3 right-3 z-10 flex flex-col items-end gap-2">
+        <div className="flex items-center gap-2">
+          <button
+            id="zoom-in"
+            onClick={handleZoomIn}
+            title="Zoom in"
+            className="w-8 h-8 rounded-lg glass flex items-center justify-center text-sm text-[var(--color-text-muted)] hover:text-white transition-all"
+          >
+            +
+          </button>
+          <button
+            id="zoom-out"
+            onClick={handleZoomOut}
+            title="Zoom out"
+            className="w-8 h-8 rounded-lg glass flex items-center justify-center text-sm text-[var(--color-text-muted)] hover:text-white transition-all"
+          >
+            −
+          </button>
+          <button
+            id="toggle-pan-mode"
+            onClick={() => setPanMode(p => !p)}
+            title={
+              panMode
+                ? 'Pan mode ON — left-drag pans, right-drag rotates'
+                : 'Toggle pan mode (currently: left-drag rotates, right-drag pans)'
+            }
+            className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm transition-all ${
+              panMode
+                ? 'bg-[var(--color-accent)] text-white'
+                : 'glass text-[var(--color-text-muted)] hover:text-white'
+            }`}
+          >
+            ✥
+          </button>
+          <button
+            id="toggle-auto-rotate"
+            onClick={() => setAutoRotate(!autoRotate)}
+            title="Toggle auto-rotate"
+            className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs transition-all ${
+              autoRotate
+                ? 'bg-[var(--color-accent)] text-white'
+                : 'glass text-[var(--color-text-muted)] hover:text-white'
+            }`}
+          >
+            ↻
+          </button>
+          <button
+            id="reset-camera"
+            onClick={resetCamera}
+            title="Reset camera"
+            className="w-8 h-8 rounded-lg glass flex items-center justify-center text-xs text-[var(--color-text-muted)] hover:text-white transition-all"
+          >
+            ⟲
+          </button>
+          <button
+            id="toggle-fullscreen"
+            onClick={toggleFullscreen}
+            title="Fullscreen"
+            className="w-8 h-8 rounded-lg glass flex items-center justify-center text-xs text-[var(--color-text-muted)] hover:text-white transition-all"
+          >
+            {isFullscreen ? '⊖' : '⊕'}
+          </button>
+        </div>
+
+        {/* Pan-arrow buttons (always available, regardless of pan mode) */}
+        {hasContent && (
+          <div
+            id="pan-arrows"
+            className="glass rounded-lg p-1 grid grid-cols-3 gap-0.5"
+            title="Pan the model (Shift × 3)"
+          >
+            <span />
+            <button
+              id="pan-up"
+              onClick={e => panCamera('up', e.shiftKey)}
+              className="w-7 h-7 rounded-md flex items-center justify-center text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-white transition-colors"
+            >
+              ↑
+            </button>
+            <span />
+            <button
+              id="pan-left"
+              onClick={e => panCamera('left', e.shiftKey)}
+              className="w-7 h-7 rounded-md flex items-center justify-center text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-white transition-colors"
+            >
+              ←
+            </button>
+            <span className="w-7 h-7 flex items-center justify-center text-[10px] text-[var(--color-text-muted)] opacity-50">
+              ✥
+            </span>
+            <button
+              id="pan-right"
+              onClick={e => panCamera('right', e.shiftKey)}
+              className="w-7 h-7 rounded-md flex items-center justify-center text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-white transition-colors"
+            >
+              →
+            </button>
+            <span />
+            <button
+              id="pan-down"
+              onClick={e => panCamera('down', e.shiftKey)}
+              className="w-7 h-7 rounded-md flex items-center justify-center text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-white transition-colors"
+            >
+              ↓
+            </button>
+            <span />
+          </div>
+        )}
       </div>
 
       {/* Empty state */}
@@ -907,6 +1028,9 @@ export function Viewer3D({
           {/* Track camera world-space right/up axes for move-pad use */}
           <CameraVectorTracker store={cameraVectorsRef} />
 
+          {/* Bridge OrbitControls into a ref for HTML pan buttons */}
+          <ControlsBridge store={controlsStoreRef} />
+
           {/* Controls */}
           <OrbitControls
             makeDefault
@@ -916,6 +1040,17 @@ export function Viewer3D({
             dampingFactor={0.05}
             minDistance={5}
             maxDistance={200}
+            enablePan
+            screenSpacePanning
+            mouseButtons={{
+              LEFT: panMode ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE,
+              MIDDLE: THREE.MOUSE.DOLLY,
+              RIGHT: panMode ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN,
+            }}
+            touches={{
+              ONE: panMode ? THREE.TOUCH.PAN : THREE.TOUCH.ROTATE,
+              TWO: THREE.TOUCH.DOLLY_PAN,
+            }}
           />
         </Suspense>
       </Canvas>
