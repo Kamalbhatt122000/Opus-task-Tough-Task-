@@ -64,24 +64,31 @@ def place_stones(jewellery_mesh, cavities: List[Dict], stones: List) -> Dict[str
         #
         # For rim-loop cavities the centroid is already on the rim plane.
         # For curvature-dish cavities the centroid lies inside the dish, so
-        # we project it outward onto the mesh surface via raycast — that
-        # surface hit is the true rim. If the raycast misses (degenerate
-        # geometry), fall back to the seat_offset_factor heuristic.
+        # we cast a ray from FAR ABOVE the centroid going INWARD — the first
+        # hit (closest to the ray origin) is the surrounding metal surface,
+        # i.e. the true rim. The previous version cast outward from inside
+        # the cavity and ended up snapping to the cavity floor itself, which
+        # sank the stone into engraved recesses (eye sockets, bezel cups).
         # -------------------------------------------------------------- #
         depth_mm = float(cavity["depth_mm"])
         seat_factor = float(cavity.get("seat_offset_factor", 0.40))
 
+        # Default: heuristic placement at depth * seat_factor above centroid.
         rim_pt = centroid_arr + outward * (depth_mm * seat_factor)
+
         if seat_factor > 0.0:
             try:
-                origins = (centroid_arr - outward * 1e-3).reshape(1, 3)
-                directions = outward.reshape(1, 3)
+                # Start well outside the cavity, point inward toward it.
+                offset = max(depth_mm + 1.0, 2.0)
+                ray_origin = (centroid_arr + outward * offset).reshape(1, 3)
+                ray_direction = (-outward).reshape(1, 3)
                 locs, _, _ = jewellery_mesh.ray.intersects_location(
-                    ray_origins=origins,
-                    ray_directions=directions,
+                    ray_origins=ray_origin,
+                    ray_directions=ray_direction,
                 )
                 if len(locs) > 0:
-                    dists = np.linalg.norm(locs - centroid_arr, axis=1)
+                    # First hit = closest to the ray origin = the rim
+                    dists = np.linalg.norm(locs - ray_origin[0], axis=1)
                     rim_pt = locs[int(np.argmin(dists))]
             except Exception as exc:
                 logger.debug("Rim raycast failed for cavity %d: %s", i + 1, exc)

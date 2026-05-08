@@ -4,17 +4,20 @@
  * Layout: Left panel (35%) with controls + Right panel (65%) with 3D viewer.
  */
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { UploadZone } from './components/UploadZone';
 import { ProgressStepper } from './components/ProgressStepper';
 import { StoneControls } from './components/StoneControls';
 import { CavityList } from './components/CavityList';
 import { ManualStonePanel } from './components/ManualStonePanel';
+import { ChatPanel } from './components/ChatPanel';
 import { Viewer3D } from './components/Viewer3D';
-import { useProcess } from './hooks/useProcess';
+import { useStagedProcess } from './hooks/useStagedProcess';
 import { useRegenerate } from './hooks/useRegenerate';
+import { useChat } from './hooks/useChat';
 import type {
   Cavity,
+  ChatOperation,
   ManualStone,
   PendingMeshClick,
   StoneMaterialName,
@@ -27,13 +30,34 @@ function App() {
   // File state
   const [file, setFile] = useState<File | null>(null);
 
-  // Process hook
-  const { stages, result, error, isProcessing, process, reset } = useProcess();
+  // Staged-pipeline hook — one HTTP call per stage so the user can pause
+  // between stages and inspect intermediate state.
+  const {
+    stages,
+    stage1,
+    stage2,
+    stage3,
+    stage4,
+    error,
+    isRunning,
+    nextRunnableStage,
+    runStage1,
+    runNext,
+    reset,
+  } = useStagedProcess();
 
   // Regenerate hook
   const { regenerate, isRegenerating } = useRegenerate();
 
-  // Display data (can be updated by regeneration)
+  // Chat hook — natural-language stone modifications via Gemini.
+  const {
+    messages: chatMessages,
+    isThinking: chatThinking,
+    send: sendChat,
+    clear: clearChat,
+  } = useChat();
+
+  // Display data — overrides built-from-stages output when regenerate lands.
   const [displayResult, setDisplayResult] = useState<ProcessResponse | null>(null);
 
   // Stone settings
@@ -74,19 +98,39 @@ function App() {
     () => new Map(),
   );
 
-  // Use displayResult if available (from regeneration), else use original result
-  const activeResult = displayResult || result;
+  // Build a ProcessResponse-shaped object from per-stage data so the rest
+  // of the UI doesn't need to know about the staged flow.
+  const builtFromStages = useMemo<ProcessResponse | null>(() => {
+    if (!stage1) return null;
+    const total =
+      stage1.stage_ms +
+      (stage2?.stage_ms ?? 0) +
+      (stage3?.stage_ms ?? 0) +
+      (stage4?.stage_ms ?? 0);
+    return {
+      session_id: stage1.session_id,
+      metadata: {
+        filename: stage1.metadata.filename,
+        vertices: stage1.metadata.vertices,
+        faces: stage1.metadata.faces,
+        bounding_box_mm: stage1.metadata.bounding_box_mm,
+        total_cavities: stage2?.total_cavities ?? 0,
+        processing_time_ms: {
+          stage1_load: stage1.stage_ms,
+          stage2_detect: stage2?.stage_ms ?? 0,
+          stage3_generate: stage3?.stage_ms ?? 0,
+          stage4_place: stage4?.stage_ms ?? 0,
+          total,
+        },
+      },
+      cavities: stage2?.cavities ?? [],
+      jewellery_mesh_b64: stage1.jewellery_mesh_b64,
+      composite_mesh_b64: stage4?.composite_mesh_b64 ?? '',
+      stones_glb_b64: stage4?.stones_glb_b64 ?? '',
+    };
+  }, [stage1, stage2, stage3, stage4]);
 
-  // Sync result to displayResult when first result arrives
-  const prevResultRef = useState<ProcessResponse | null>(null);
-  if (result && result !== prevResultRef[0]) {
-    prevResultRef[1](result);
-    if (!displayResult) {
-      setDisplayResult(result);
-    } else if (result.session_id !== displayResult.session_id) {
-      setDisplayResult(result);
-    }
-  }
+  const activeResult = displayResult || builtFromStages;
 
   const handleFileSelected = useCallback((f: File) => {
     setFile(f);
@@ -100,6 +144,7 @@ function App() {
     reset();
   }, [reset]);
 
+  // Stage 1 trigger — wired to the UploadZone's primary button.
   const handleProcess = useCallback(() => {
     if (file) {
       setDisplayResult(null);
@@ -109,9 +154,32 @@ function App() {
       setSelectedManualId(null);
       setPendingMeshClick(null);
       setAutoStoneOffsets(new Map());
-      process(file);
+      runStage1(file);
     }
-  }, [file, process]);
+  }, [file, runStage1]);
+
+  // Stage 2/3/4 trigger — wired to the ProgressStepper's Next button.
+  const handleRunNext = useCallback(() => {
+    runNext(stoneCut);
+  }, [runNext, stoneCut]);
+
+  // Apply a list of chat-driven operations to viewer state.
+  // handleCutChange isn't defined yet at this point in the file, so we
+  // route through a ref that gets bound below.
+  const handleApplyOperationsRef = useRef<(ops: ChatOperation[]) => Promise<void>>(
+    async () => {},
+  );
+
+  const handleSendChat = useCallback(
+    async (msg: string) => {
+      if (!activeResult?.session_id) return;
+      const ops = await sendChat(activeResult.session_id, msg);
+      if (ops.length > 0) {
+        await handleApplyOperationsRef.current(ops);
+      }
+    },
+    [activeResult, sendChat],
+  );
 
   const handleStoneClick = useCallback((stoneId: number) => {
     // Selecting an auto stone clears manual selection and any pending click.
@@ -284,22 +352,148 @@ function App() {
 
   const handleCutChange = useCallback(async (cut: StoneCutName) => {
     setStoneCut(cut);
-    if (activeResult?.session_id) {
+    // Regenerate only lands meaningful output once stage 4 has run.
+    if (activeResult?.session_id && stage4) {
       const newResult = await regenerate({
         session_id: activeResult.session_id,
         stone_type: cut,
         stone_material: stoneMaterial,
       });
       if (newResult) {
-        setDisplayResult(newResult);
+        setDisplayResult({
+          ...activeResult,
+          cavities: newResult.cavities ?? activeResult.cavities,
+          composite_mesh_b64:
+            newResult.composite_mesh_b64 ?? activeResult.composite_mesh_b64,
+          stones_glb_b64:
+            newResult.stones_glb_b64 ?? activeResult.stones_glb_b64,
+        });
       }
     }
-  }, [activeResult, stoneMaterial, regenerate]);
+  }, [activeResult, stage4, stoneMaterial, regenerate]);
 
   const handleMaterialChange = useCallback((mat: StoneMaterialName) => {
     setStoneMaterial(mat);
     // Material change is client-side only — no backend call needed
   }, []);
+
+  // Apply a chat-driven operation list. Defined here (after handleCutChange)
+  // and assigned to handleApplyOperationsRef so the chat-send callback
+  // declared earlier can call into it.
+  const handleApplyOperations = useCallback(
+    async (ops: ChatOperation[]) => {
+      for (const op of ops) {
+        switch (op.type) {
+          case 'set_size':
+            setStoneSize(op.factor);
+            break;
+          case 'set_cut':
+            await handleCutChange(op.cut);
+            break;
+          case 'set_material':
+            setStoneMaterial(op.material);
+            break;
+          case 'set_color':
+            setCustomColor(op.color);
+            break;
+          case 'set_jewellery_material':
+            setJewelleryMaterial(op.material);
+            break;
+          case 'remove_stone':
+            setHiddenStoneIds(prev => {
+              const next = new Set(prev);
+              next.add(op.stone_id);
+              return next;
+            });
+            break;
+          case 'restore_all':
+            setHiddenStoneIds(new Set());
+            break;
+          case 'move_stone':
+            setAutoStoneOffsets(prev => {
+              const next = new Map(prev);
+              const cur = next.get(op.stone_id) ?? [0, 0, 0];
+              next.set(op.stone_id, [
+                cur[0] + op.dx,
+                cur[1] + op.dy,
+                cur[2] + op.dz,
+              ]);
+              return next;
+            });
+            break;
+          case 'duplicate_stone': {
+            // Look up the source cavity and clone its position + normal as a
+            // manual stone offset by (dx, dy, dz). Manual stones live entirely
+            // client-side, so this never hits the backend.
+            const src = activeResult?.cavities.find(c => c.id === op.stone_id);
+            if (!src) break;
+            const id =
+              typeof crypto !== 'undefined' && 'randomUUID' in crypto
+                ? crypto.randomUUID()
+                : `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            // Cavity stores INWARD normal — flip for the manual stone API.
+            const outward: [number, number, number] = [
+              -src.normal[0],
+              -src.normal[1],
+              -src.normal[2],
+            ];
+            setManualStones(s => [
+              ...s,
+              {
+                id,
+                position: [
+                  src.centroid_mm[0] + op.dx,
+                  src.centroid_mm[1] + op.dy,
+                  src.centroid_mm[2] + op.dz,
+                ],
+                normal: outward,
+                diameter_mm: src.diameter_mm,
+                depth_mm: src.depth_mm,
+                cut: (src.stone_cut as StoneCutName) ?? 'round_brilliant',
+                liftOffset: 0,
+              },
+            ]);
+            break;
+          }
+          case 'add_stone': {
+            const id =
+              typeof crypto !== 'undefined' && 'randomUUID' in crypto
+                ? crypto.randomUUID()
+                : `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const diameter = op.diameter_mm ?? 2.0;
+            // Match the depth ratio used elsewhere for round-brilliants.
+            const depth = diameter * 0.7;
+            // Default to flat-up (+Y) if no normal supplied — matches the
+            // anchors the prompt advertises (top/bottom/center on Y axis).
+            const nx = op.nx ?? 0;
+            const ny = op.ny ?? 1;
+            const nz = op.nz ?? 0;
+            setManualStones(s => [
+              ...s,
+              {
+                id,
+                position: [op.x, op.y, op.z],
+                normal: [nx, ny, nz],
+                diameter_mm: diameter,
+                depth_mm: depth,
+                cut: op.cut ?? 'round_brilliant',
+                liftOffset: 0,
+              },
+            ]);
+            setSelectedManualId(id);
+            setSelectedCavityId(null);
+            break;
+          }
+        }
+      }
+    },
+    [activeResult, handleCutChange],
+  );
+
+  // Keep the forward-declared ref pointing at the latest handler.
+  useEffect(() => {
+    handleApplyOperationsRef.current = handleApplyOperations;
+  }, [handleApplyOperations]);
 
   const handleCavitySelect = useCallback((cavity: Cavity) => {
     setSelectedCavityId(prev => prev === cavity.id ? null : cavity.id);
@@ -348,7 +542,7 @@ function App() {
           {/* Upload */}
           <UploadZone
             onFileSelected={handleFileSelected}
-            isProcessing={isProcessing}
+            isProcessing={isRunning && nextRunnableStage === 1}
             onProcess={handleProcess}
             hasFile={!!file}
             fileName={file?.name}
@@ -363,9 +557,18 @@ function App() {
             </div>
           )}
 
-          {/* Progress stepper (show during/after processing) */}
-          {(isProcessing || activeResult || error) && (
-            <ProgressStepper stages={stages} />
+          {/* Progress stepper — show as soon as a file is selected so the
+              user can see the upcoming steps and click Next on each one. */}
+          {(file || isRunning || activeResult || error) && (
+            <ProgressStepper
+              stages={stages}
+              // Stage 1 is triggered by the UploadZone button.
+              nextRunnableStage={
+                nextRunnableStage && nextRunnableStage > 1 ? nextRunnableStage : null
+              }
+              isRunning={isRunning}
+              onRunNext={handleRunNext}
+            />
           )}
 
           {/* Metadata card */}
@@ -514,6 +717,16 @@ function App() {
               />
             </>
           )}
+
+          {/* Chat panel — natural-language stone modifications via Gemini */}
+          <div className="h-px bg-[var(--color-border)]" />
+          <ChatPanel
+            messages={chatMessages}
+            onSend={handleSendChat}
+            onClear={clearChat}
+            isThinking={chatThinking}
+            disabled={!activeResult?.session_id}
+          />
         </div>
 
         {/* Footer */}

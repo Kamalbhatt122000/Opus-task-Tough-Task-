@@ -633,6 +633,56 @@ export function Viewer3D({
     );
   }, [zoomDistance, onZoomDistanceChange]);
 
+  /**
+   * Snap the camera to one of the six canonical orthographic-style views.
+   * The OrbitControls target is preserved (so the model stays framed) and
+   * the camera is moved to a point at `zoomDistance` along the chosen axis.
+   * Auto-rotate is disabled — otherwise the snap immediately drifts.
+   */
+  type ViewSide = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right';
+  const snapToView = useCallback(
+    (side: ViewSide) => {
+      const controls = controlsStoreRef.current;
+      if (!controls) return;
+      const cam = (controls as unknown as { object: THREE.Object3D }).object;
+      const target = controls.target;
+      const dist = zoomDistance;
+      let dir: THREE.Vector3;
+      let up = new THREE.Vector3(0, 1, 0);
+      switch (side) {
+        case 'top':
+          dir = new THREE.Vector3(0, 1, 0);
+          up = new THREE.Vector3(0, 0, -1);
+          break;
+        case 'bottom':
+          dir = new THREE.Vector3(0, -1, 0);
+          up = new THREE.Vector3(0, 0, 1);
+          break;
+        case 'front':
+          dir = new THREE.Vector3(0, 0, 1);
+          break;
+        case 'back':
+          dir = new THREE.Vector3(0, 0, -1);
+          break;
+        case 'right':
+          dir = new THREE.Vector3(1, 0, 0);
+          break;
+        case 'left':
+          dir = new THREE.Vector3(-1, 0, 0);
+          break;
+      }
+      cam.position.copy(target).add(dir.multiplyScalar(dist));
+      // OrbitControls reads `up` to constrain rotation; updating it for
+      // top/bottom prevents the gimbal-lock flip that happens when the
+      // view direction is parallel to the world-up axis.
+      (cam as THREE.PerspectiveCamera).up.copy(up);
+      (cam as THREE.PerspectiveCamera).lookAt?.(target);
+      setAutoRotate(false);
+      controls.update();
+    },
+    [zoomDistance],
+  );
+
   const materialProps = MATERIAL_PRESETS[stoneMaterial];
   const jewelleryPreset = JEWELLERY_PRESETS[jewelleryMaterial];
 
@@ -898,6 +948,64 @@ export function Viewer3D({
             {isFullscreen ? '⊖' : '⊕'}
           </button>
         </div>
+
+        {/* Side-view snap buttons — six canonical views of the STL. */}
+        {hasContent && (
+          <div
+            id="view-sides"
+            className="glass rounded-lg p-1 grid grid-cols-3 gap-0.5"
+            title="Snap camera to a side view"
+          >
+            <button
+              id="view-top-left"
+              onClick={() => snapToView('left')}
+              title="Left view (-X)"
+              className="w-7 h-7 rounded-md flex items-center justify-center text-[10px] font-semibold text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-white transition-colors"
+            >
+              L
+            </button>
+            <button
+              id="view-top"
+              onClick={() => snapToView('top')}
+              title="Top view (+Y)"
+              className="w-7 h-7 rounded-md flex items-center justify-center text-[10px] font-semibold text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-white transition-colors"
+            >
+              T
+            </button>
+            <button
+              id="view-right"
+              onClick={() => snapToView('right')}
+              title="Right view (+X)"
+              className="w-7 h-7 rounded-md flex items-center justify-center text-[10px] font-semibold text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-white transition-colors"
+            >
+              R
+            </button>
+            <button
+              id="view-front"
+              onClick={() => snapToView('front')}
+              title="Front view (+Z)"
+              className="w-7 h-7 rounded-md flex items-center justify-center text-[10px] font-semibold text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-white transition-colors"
+            >
+              F
+            </button>
+            <button
+              id="view-bottom"
+              onClick={() => snapToView('bottom')}
+              title="Bottom view (-Y)"
+              className="w-7 h-7 rounded-md flex items-center justify-center text-[10px] font-semibold text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-white transition-colors"
+            >
+              Bt
+            </button>
+            <button
+              id="view-back"
+              onClick={() => snapToView('back')}
+              title="Back view (-Z)"
+              className="w-7 h-7 rounded-md flex items-center justify-center text-[10px] font-semibold text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-white transition-colors"
+            >
+              Bk
+            </button>
+          </div>
+        )}
 
         {/* Pan-arrow buttons (always available, regardless of pan mode) */}
         {hasContent && (

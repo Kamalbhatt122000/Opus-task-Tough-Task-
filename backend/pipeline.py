@@ -25,6 +25,131 @@ def get_session(session_id: str) -> dict | None:
     return _sessions.get(session_id)
 
 
+# ======================================================================= #
+# Per-stage functions — used by the /api/session/* staged endpoints. The
+# legacy run_pipeline() generator below still exists for the SSE endpoint;
+# both share the same _sessions store.
+# ======================================================================= #
+
+def stage1_load(stl_path: str, filename: str) -> dict:
+    """Stage 1 — load + validate the mesh, create a session."""
+    from detector.loader import load_and_validate_mesh
+
+    t0 = time.perf_counter()
+    mesh = load_and_validate_mesh(stl_path)
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+
+    session_id = str(uuid.uuid4())
+    jewellery_b64 = base64.b64encode(mesh.export(file_type="stl")).decode()
+    bb = mesh.bounding_box.extents.tolist()
+
+    _sessions[session_id] = {
+        "mesh": mesh,
+        "filename": filename,
+        "cavities": None,
+        "stones": None,
+        "stone_type": "round_brilliant",
+        "stone_material": "Diamond",
+        "composite_glb": b"",
+        "stages_done": {1: True, 2: False, 3: False, 4: False},
+        "timings": {"stage1_load": elapsed_ms},
+    }
+
+    return {
+        "session_id": session_id,
+        "metadata": {
+            "filename": filename,
+            "vertices": len(mesh.vertices),
+            "faces": len(mesh.faces),
+            "bounding_box_mm": [round(x, 2) for x in bb],
+        },
+        "jewellery_mesh_b64": jewellery_b64,
+        "stage_ms": elapsed_ms,
+    }
+
+
+def stage2_detect(session_id: str) -> dict | None:
+    session = _sessions.get(session_id)
+    if session is None or not session["stages_done"].get(1):
+        return None
+    from detector.cavity_detector import detect_cavities
+
+    t0 = time.perf_counter()
+    cavities = detect_cavities(session["mesh"])
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+
+    session["cavities"] = cavities
+    session["stages_done"][2] = True
+    session["stages_done"][3] = False
+    session["stages_done"][4] = False
+    session["stones"] = None
+    session["timings"]["stage2_detect"] = elapsed_ms
+    return {"cavities": cavities, "total_cavities": len(cavities), "stage_ms": elapsed_ms}
+
+
+def stage3_generate(session_id: str,
+                    stone_type: str = "round_brilliant") -> dict | None:
+    session = _sessions.get(session_id)
+    if session is None or not session["stages_done"].get(2):
+        return None
+    from generator.stone_generator import generate_stones
+
+    t0 = time.perf_counter()
+    stones = generate_stones(session["cavities"], stone_type=stone_type)
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+
+    session["stones"] = stones
+    session["stone_type"] = stone_type
+    session["stages_done"][3] = True
+    session["stages_done"][4] = False
+    session["timings"]["stage3_generate"] = elapsed_ms
+    return {
+        "stone_count": sum(1 for s in stones if s is not None),
+        "stone_type": stone_type,
+        "stage_ms": elapsed_ms,
+    }
+
+
+def stage4_place(session_id: str) -> dict | None:
+    session = _sessions.get(session_id)
+    if session is None or not session["stages_done"].get(3):
+        return None
+    from generator.placer import place_stones
+
+    t0 = time.perf_counter()
+    placement = place_stones(session["mesh"], session["cavities"], session["stones"])
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+
+    composite_b64 = base64.b64encode(placement["composite_glb"]).decode()
+    stones_b64 = base64.b64encode(placement["stones_glb"]).decode()
+
+    session["composite_glb"] = placement["composite_glb"]
+    session["stages_done"][4] = True
+    session["timings"]["stage4_place"] = elapsed_ms
+
+    return {
+        "composite_mesh_b64": composite_b64,
+        "stones_glb_b64": stones_b64,
+        "stage_ms": elapsed_ms,
+        "timings": dict(session["timings"]),
+    }
+
+
+def get_session_state(session_id: str) -> dict | None:
+    session = _sessions.get(session_id)
+    if session is None:
+        return None
+    return {
+        "session_id": session_id,
+        "filename": session.get("filename"),
+        "stages_done": dict(session["stages_done"]),
+        "cavities": session.get("cavities") or [],
+        "stone_type": session.get("stone_type"),
+        "stone_material": session.get("stone_material"),
+        "timings": dict(session.get("timings", {})),
+    }
+
+
 def _sse(stage: int, status: str, message: str, data=None) -> str:
     payload = {"stage": stage, "status": status, "message": message, "data": data}
     return f"data: {json.dumps(payload)}\n\n"
